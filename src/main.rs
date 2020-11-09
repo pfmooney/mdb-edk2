@@ -41,8 +41,12 @@ fn post_process(results: &BTreeMap<u64, SymRes>, base: &str, addr_end: u64) {
             }
             sz => sz,
         };
+        // While '`' would be the expected delimiter between object and function
+        // name, it (currently) confuses name resolution in mdb-bhyve since
+        // there are effectively no objects.  Use '.' instead, so the private
+        // symbols can be referred to directly.
         println!(
-            "{:x}::nmadd -{} -s {:x} \"{}`{}\"",
+            "{:x}::nmadd -{} -s {:x} \"{}.{}\"",
             addr,
             if res.is_func { "f" } else { "o" },
             size,
