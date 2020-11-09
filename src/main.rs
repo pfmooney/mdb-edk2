@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{File, Metadata};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};
 
@@ -20,54 +20,87 @@ fn usage() -> ! {
     std::process::exit(0);
 }
 
-fn process_file(base: &str, path: &Path, addr: u64) -> Result<()> {
+struct SymRes<'a> {
+    name: &'a str,
+    size: u64,
+    is_func: bool,
+}
+
+fn post_process(results: &BTreeMap<u64, SymRes>, base: &str, addr_end: u64) {
+    let mut iter = results.iter().peekable();
+    while let Some((addr, res)) = iter.next() {
+        let size = match res.size {
+            0 => {
+                // For any entries which lack a proper size, stretch it out
+                // until it hits the next entry (or the end of the section).
+                if let Some((naddr, _)) = iter.peek() {
+                    *naddr - addr
+                } else {
+                    addr_end - addr
+                }
+            }
+            sz => sz,
+        };
+        println!(
+            "{:x}::nmadd -{} -s {:x} \"{}`{}\"",
+            addr,
+            if res.is_func { "f" } else { "o" },
+            size,
+            base,
+            res.name
+        );
+    }
+}
+
+fn process_file(base: &str, path: &Path, addr_start: u64) -> Result<()> {
     if !path.metadata()?.is_file() {
         return Err(Error::new(ErrorKind::InvalidData, "bad object file"));
     }
     let map = unsafe { memmap::Mmap::map(&File::open(path)?)? };
     let elf = goblin::elf::Elf::parse(&map)
-        .or_else(|e| Err(Error::new(ErrorKind::InvalidData, e.to_string())))?;
+        .map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
 
-    let text_shndx = elf
-        .section_headers
-        .iter()
-        .enumerate()
-        .find(|(_ndx, hdr)| {
+    let (text_shndx, addr_end) = if let Some((ndx, hdr)) =
+        elf.section_headers.iter().enumerate().find(|(_ndx, hdr)| {
             if let Some(Ok(shdr_name)) = elf.shdr_strtab.get(hdr.sh_name) {
                 shdr_name == ".text"
             } else {
                 false
             }
-        })
-        .map(|(ndx, _hdr)| ndx)
-        .unwrap_or_else(|| usize::MAX);
+        }) {
+        (ndx, addr_start + hdr.sh_size)
+    } else {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "No .text section found",
+        ));
+    };
+
+    let mut results = BTreeMap::new();
 
     for sym in elf.syms.iter() {
+        if sym.st_shndx != text_shndx {
+            continue;
+        }
+
         if sym.is_function() {
             if let Some(Ok(name)) = elf.strtab.get(sym.st_name) {
-                println!(
-                    "{:x}::nmadd -f -s {:x} \"{}`{}\"",
-                    addr + sym.st_value,
-                    sym.st_size,
-                    base,
-                    name
+                results.insert(
+                    addr_start + sym.st_value,
+                    SymRes { name, size: sym.st_size, is_func: true },
                 );
             }
-        } else if sym.st_bind() == goblin::elf::sym::STB_GLOBAL
-            && sym.st_shndx == text_shndx
-        {
+        } else if sym.st_bind() == goblin::elf::sym::STB_GLOBAL {
             // Functions implemented in assembly may not be properly typed
             if let Some(Ok(name)) = elf.strtab.get(sym.st_name) {
-                println!(
-                    "{:x}::nmadd -o -s {:x} \"{}`{}\"",
-                    addr + sym.st_value,
-                    sym.st_size,
-                    base,
-                    name
+                results.insert(
+                    addr_start + sym.st_value,
+                    SymRes { name, size: sym.st_size, is_func: false },
                 );
             }
         }
     }
+    post_process(&results, base, addr_end);
     Ok(())
 }
 
@@ -114,6 +147,8 @@ fn main() {
     }
     for (addr_offset, file_base) in map.iter() {
         let obj = obj_dir.join(format!("{}.debug", file_base));
-        let err = process_file(file_base, &obj, *addr_offset);
+        if let Err(e) = process_file(file_base, &obj, *addr_offset) {
+            eprintln!("Error processing {}: {:?}", file_base, e);
+        }
     }
 }
