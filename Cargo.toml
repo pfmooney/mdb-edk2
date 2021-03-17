@@ -1,5 +1,5 @@
 [package]
-name = "mdb-tianocore"
+name = "mdb-edk2"
 version = "0.1.0"
 authors = ["Patrick Mooney <pmooney@pfmooney.com>"]
 edition = "2018"
